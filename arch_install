@@ -1,0 +1,89 @@
+#!/bin/bash
+
+# Exit on error
+set -e
+
+# Function to list available disks
+list_disks() {
+    echo "Available disks:"
+    lsblk -d -e 7,11 -o NAME,SIZE,TYPE | grep "disk"
+}
+
+# Function to prompt for user input
+prompt_user_input() {
+    read -rp "Enter hostname: " HOSTNAME
+    read -rp "Enter username: " USERNAME
+    read -rsp "Enter password (input hidden): " PASSWORD
+    echo
+    echo "Listing available disks..."
+    list_disks
+    read -rp "Enter the disk (e.g., /dev/sda or /dev/nvme0n1): " DISK
+}
+
+# Function for partitioning and formatting
+partition_and_format() {
+    echo "Partitioning and formatting $DISK..."
+    parted $DISK --script mklabel gpt
+    parted $DISK --script mkpart primary fat32 1MiB 512MiB
+    parted $DISK --script set 1 esp on
+    parted $DISK --script mkpart primary btrfs 512MiB 100%
+
+    mkfs.fat -F32 ${DISK}1
+    mkfs.btrfs ${DISK}2
+
+    mount ${DISK}2 /mnt
+    mkdir -p /mnt/boot
+    mount ${DISK}1 /mnt/boot
+}
+
+# Function for installation and configuration
+install_and_configure() {
+    echo "Installing base system..."
+    pacstrap /mnt base linux linux-firmware btrfs-progs vim neovim networkmanager sudo
+
+    echo "Generating fstab..."
+    genfstab -U /mnt >> /mnt/etc/fstab
+
+    echo "Entering chroot environment for configuration..."
+    arch-chroot /mnt /bin/bash <<EOF
+
+    echo "Setting up timezone..."
+    ln -sf /usr/share/zoneinfo/America/Detroit /etc/localtime
+    hwclock --systohc
+
+    echo "Configuring locale..."
+    echo "en_US.UTF-8 UTF-8" > /etc/locale.gen
+    locale-gen
+    echo "LANG=en_US.UTF-8" > /etc/locale.conf
+
+    echo "Setting hostname..."
+    echo "$HOSTNAME" > /etc/hostname
+    echo "127.0.0.1 localhost" >> /etc/hosts
+    echo "::1 localhost" >> /etc/hosts
+    echo "127.0.1.1 $HOSTNAME.localdomain $HOSTNAME" >> /etc/hosts
+
+    echo "Setting root password..."
+    echo "root:$PASSWORD" | chpasswd
+
+    echo "Creating user and setting password..."
+    useradd -m -G wheel -s /bin/bash $USERNAME
+    echo "$USERNAME:$PASSWORD" | chpasswd
+
+    echo "Enabling sudo for wheel group..."
+    sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+
+    echo "Enabling essential services..."
+    systemctl enable NetworkManager
+
+EOF
+}
+
+# Main installation process
+prompt_user_input
+partition_and_format
+install_and_configure
+
+# Unmount and reboot
+umount -R /mnt
+echo "Installation complete! Rebooting now..."
+reboot
